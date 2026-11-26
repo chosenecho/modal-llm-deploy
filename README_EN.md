@@ -43,9 +43,11 @@ Inspect safetensors shard completeness, FP8 `quantization_config`, and `<think>`
 python modal-deploy/inspect_weights.py /path/to/your-fp8-model-dir
 ```
 
-### 3. Create API Key Secret and Weights Volume
+### 3. Create Auth Credentials and Weights Volume
 
-The server **refuses to start without a Bearer API key**, preventing unauthenticated GPU exposure:
+The server enables **two-layer authentication** by default:
+- **Modal Edge Proxy Auth** (`requires_proxy_auth=True`): create a Proxy Auth Token in Modal Dashboard under **Settings → Proxy Auth Tokens** (`Modal-Key: wk-...` and `Modal-Secret: ws-...`). Unauthenticated requests are rejected with `401` at Modal's ingress **before waking up any GPU container** (\$0 GPU burn from unauthorized traffic).
+- **In-Container Bearer API Key** (`--api-key`): defense-in-depth inside SGLang; the container refuses to start if the Secret is missing:
 
 ```bash
 modal secret create qwen-api-key SGLANG_API_KEY="sk-replace-with-your-strong-secret"
@@ -101,16 +103,32 @@ Modal prints the deployed HTTPS endpoint (e.g. `https://<workspace>--qwen38-27b-
 python modal-deploy/smoke_test.py \
   --url https://<workspace>--qwen38-27b-sglang-sglangserver-serve.modal.run \
   --api-key "sk-replace-with-your-strong-secret" \
+  --modal-key "wk-replace-with-your-proxy-key" \
+  --modal-secret "ws-replace-with-your-proxy-secret" \
   --model qwen3.8-27b-ft
 ```
 
 The smoke test verifies:
-1. Unauthenticated `GET /v1/models` returns `401/403` (first call builds & persists the GPU memory snapshot)
-2. Authenticated `GET /v1/models` lists the expected model ID
+1. Unauthenticated `GET /v1/models` fails fast with `401` at Modal's edge proxy (**without waking the GPU**)
+2. Authenticated `GET /v1/models` (with `Modal-Key`, `Modal-Secret`, and Bearer key) builds & persists the initial GPU snapshot, lists the expected model ID, and verifies inner Bearer auth rejection when `Authorization` is omitted
 3. Streaming `POST /v1/chat/completions` (reports TTFT, total latency, `reasoning_content`, and `content`)
 4. Structured OpenAI tool-calling argument parsing
 
-For OpenAI-compatible SDKs and coding agents, set **Base URL** to `https://<your-endpoint>.modal.run/v1` and set client HTTP timeout to `>= 120s` to allow for cold-start restoration.
+For OpenAI-compatible SDKs, set **Base URL** to `https://<your-endpoint>.modal.run/v1`, timeout to `>= 120s`, and pass `Modal-Key` + `Modal-Secret` via default headers:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://<workspace>--qwen38-27b-sglang-sglangserver-serve.modal.run/v1",
+    api_key="sk-replace-with-your-strong-secret",
+    default_headers={
+        "Modal-Key": "wk-replace-with-your-proxy-key",
+        "Modal-Secret": "ws-replace-with-your-proxy-secret",
+    },
+    timeout=180.0,
+)
+```
 
 ---
 
@@ -163,6 +181,7 @@ Root [`PDR.md`](PDR.md) and [`PDP.md`](PDP.md) document a companion local self-h
 
 All core knobs live at the top of [`modal-deploy/serve_sglang.py`](modal-deploy/serve_sglang.py):
 
+- **`SGLANG_REQUIRE_PROXY_AUTH` / `SGLANG_ENDPOINT_LABEL`**: edge proxy auth defaults to `true` so unauthorized traffic never wakes a GPU; set `SGLANG_ENDPOINT_LABEL` to use a custom or randomized subdomain.
 - **`SGLANG_MODEL_SUBDIR` / `SGLANG_SERVED_MODEL_NAME`**: override via shell env, gitignored `modal-deploy/.env.local`, or `PROFILE_MODELS` so private checkpoint names never need to be committed.
 - **`SCALEDOWN_WINDOW_SECONDS`** (default `60`): increase to `180`–`300` for fewer cold starts during slower interactive sessions, or lower to `30` to minimize idle seconds.
 - **`MAX_CONTAINERS`** (default `1`): hard concurrency ceiling against client retry storms.

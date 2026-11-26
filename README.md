@@ -45,7 +45,9 @@ python modal-deploy/inspect_weights.py /path/to/your-fp8-model-dir
 
 ### 3. 创建鉴权密钥与权重存储卷
 
-服务默认**强制校验 Bearer API Key**，缺失 Secret 时拒绝启动，避免暴露裸奔 GPU 接口：
+服务默认开启**双层鉴权**：
+- **边缘网关鉴权**（`requires_proxy_auth=True`）：在 Modal 控制台 **Settings → Proxy Auth Tokens** 生成一组 `Modal-Key`（`wk-...`）与 `Modal-Secret`（`ws-...`）。未携带合法请求头的流量会在 Modal 边缘直接返回 `401`，**不会唤醒 GPU 容器、不产生任何算力费用**，彻底防刷账单。
+- **容器内 Bearer Key 鉴权**（`--api-key`）：缺失 Secret 时拒绝启动，提供纵深防御：
 
 ```bash
 modal secret create qwen-api-key SGLANG_API_KEY="sk-replace-with-your-strong-secret"
@@ -101,16 +103,32 @@ modal deploy modal-deploy/serve_sglang.py
 python modal-deploy/smoke_test.py \
   --url https://<workspace>--qwen38-27b-sglang-sglangserver-serve.modal.run \
   --api-key "sk-replace-with-your-strong-secret" \
+  --modal-key "wk-replace-with-your-proxy-key" \
+  --modal-secret "ws-replace-with-your-proxy-secret" \
   --model qwen3.8-27b-ft
 ```
 
 脚本依次验证：
-1. 未携带 API Key 访问 `/v1/models` 返回 `401/403`（首次调用会构建并保存 GPU 显存快照）
-2. 携带正确 Key 获取 `/v1/models`
+1. 未携带凭证访问 `/v1/models`：由 Modal 边缘网关直接秒拒 `401`（**不唤醒 GPU 容器**）
+2. 携带 `Modal-Key` + `Modal-Secret` + Bearer Key 获取 `/v1/models`（首次调用会构建并保存 GPU 显存快照），并顺带校验缺失 Bearer Key 时 SGLang 仍返回 `401/403`
 3. 流式 `/v1/chat/completions`（报告 TTFT、端到端耗时、`<think>` 推理内容与正文）
 4. OpenAI Function / Tool Calling 参数结构化解析
 
-接入任意 OpenAI 兼容客户端时，将 **Base URL** 设为 `https://<你的地址>.modal.run/v1`，**HTTP 超时**建议设为 `≥ 120s` 以兼容冷启动恢复。
+接入 OpenAI Python SDK 或自定义客户端时，将 **Base URL** 设为 `https://<你的地址>.modal.run/v1`，**HTTP 超时**建议设为 `≥ 120s`，并在默认请求头附带 `Modal-Key` 和 `Modal-Secret`：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://<workspace>--qwen38-27b-sglang-sglangserver-serve.modal.run/v1",
+    api_key="sk-replace-with-your-strong-secret",
+    default_headers={
+        "Modal-Key": "wk-replace-with-your-proxy-key",
+        "Modal-Secret": "ws-replace-with-your-proxy-secret",
+    },
+    timeout=180.0,
+)
+```
 
 ---
 
@@ -163,6 +181,7 @@ python modal-deploy/smoke_test.py \
 
 关键参数均集中在 [`modal-deploy/serve_sglang.py`](modal-deploy/serve_sglang.py) 顶部：
 
+- **`SGLANG_REQUIRE_PROXY_AUTH` / `SGLANG_ENDPOINT_LABEL`**：默认开启 Modal 边缘网关鉴权（`true`），阻止未授权扫描唤醒 GPU；如需自定义/随机化子域名可设置 `SGLANG_ENDPOINT_LABEL`。
 - **`SGLANG_MODEL_SUBDIR` / `SGLANG_SERVED_MODEL_NAME`**：支持通过环境变量、`modal-deploy/.env.local` 或 `PROFILE_MODELS` 映射覆盖，无需把私有模型名写进 Git 仓库。
 - **`SCALEDOWN_WINDOW_SECONDS`**（默认 `60`）：交互间隔较长且希望减少冷启次数时可调至 `180`–`300`；极致省钱可调低至 `30`。
 - **`MAX_CONTAINERS`**（默认 `1`）：硬性单卡上限，防止客户端重试风暴拉起多卡导致费用失控。

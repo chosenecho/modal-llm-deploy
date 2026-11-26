@@ -36,6 +36,8 @@ CTX_SIZE = 16384
 PARALLEL_SLOTS = 2  # Total context is split across slots unless --no-kv-unified is tuned
 SCALEDOWN_WINDOW_SECONDS = 60
 SERVER_PORT = 8080
+# Require Modal-Key / Modal-Secret at Modal's edge proxy before waking GPU containers
+REQUIRE_PROXY_AUTH = True
 
 # Official prebuilt CUDA llama-server image (pinned tag recommended for production)
 LLAMA_IMAGE = modal.Image.from_registry(
@@ -57,7 +59,7 @@ model_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
     timeout=600,
 )
 @modal.concurrent(max_inputs=4)
-@modal.web_server(port=SERVER_PORT, startup_timeout=240)
+@modal.web_server(port=SERVER_PORT, startup_timeout=240, requires_proxy_auth=REQUIRE_PROXY_AUTH)
 def serve():
     model_file = os.path.join(MODEL_DIR, GGUF_REL_PATH)
     api_key = os.environ.get("LLAMA_API_KEY") or os.environ.get("VLLM_API_KEY")

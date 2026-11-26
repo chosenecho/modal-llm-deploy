@@ -32,6 +32,8 @@ SERVED_MODEL_NAME = "qwen3.8-27b-ft"
 MAX_MODEL_LEN = 16384
 SCALEDOWN_WINDOW_SECONDS = 60  # Scale to 0 after 60s of no requests (30-120s recommended)
 VLLM_PORT = 8000
+# Require Modal-Key / Modal-Secret at Modal's edge proxy before waking GPU containers
+REQUIRE_PROXY_AUTH = True
 
 # Optional: set to True if your model is a VL checkpoint and you only need text
 DISABLE_MULTIMODAL = True
@@ -77,7 +79,7 @@ model_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
     timeout=600,
 )
 @modal.concurrent(max_inputs=8)
-@modal.web_server(port=VLLM_PORT, startup_timeout=300)
+@modal.web_server(port=VLLM_PORT, startup_timeout=300, requires_proxy_auth=REQUIRE_PROXY_AUTH)
 def serve():
     model_path = os.path.join(MODEL_DIR, MODEL_SUBDIR)
     api_key = os.environ.get("VLLM_API_KEY")

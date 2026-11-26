@@ -6,7 +6,7 @@
 
 | 文件 | 用途 |
 | :--- | :--- |
-| [`serve_sglang.py`](serve_sglang.py) | **主力部署脚本**：Modal `L40S` (48 GB) + SGLang (`v0.5.23`) + FP8 Safetensors，集成 API Key 强制鉴权、`min_containers=0`、`scaledown_window=60s`、`max_containers=1`、**CPU+GPU 显存快照**、快照前 Warmup、小 batch decode CUDA Graph、持久化 JIT 缓存卷，以及 ModelScope 并发拉取 / HF 云端拉取。 |
+| [`serve_sglang.py`](serve_sglang.py) | **主力部署脚本**：Modal `L40S` (48 GB) + SGLang (`v0.5.23`) + FP8 Safetensors，集成 **Modal 边缘网关鉴权**（`requires_proxy_auth=True`，未授权请求不唤醒 GPU）+ Bearer API Key 双层鉴权、`min_containers=0`、`scaledown_window=60s`、`max_containers=1`、**CPU+GPU 显存快照**、快照前 Warmup、小 batch decode CUDA Graph、持久化 JIT 缓存卷，以及 ModelScope 并发拉取 / HF 云端拉取。 |
 | [`inspect_weights.py`](inspect_weights.py) | **权重预检脚本（零依赖）**：本地检查分片完整性、FP8 `quantization_config`、架构及 `<tool_call>` / `<think>` 模板，输出推荐参数。 |
 | [`smoke_test.py`](smoke_test.py) | **上线验收脚本（零依赖）**：自动验证未授权 401/403 拦截、`/v1/models`、流式输出 TTFT 与推理分离、以及 OpenAI Tool Calling 闭环。 |
 | [`quantize_fp8.py`](quantize_fp8.py) | **云端量化脚本**：在按秒计费的 Modal `A100-80GB` 上将 BF16 权重一键转为 `FP8_DYNAMIC`。 |
@@ -35,9 +35,11 @@ modal volume put qwen38-27b-weights <本地FP8目录> /qwen38-27b-fp8
 # 4. 部署（可选先复制 .env.example 为 .env.local 覆盖模型目录与名称）
 modal deploy modal-deploy/serve_sglang.py
 
-# 5. 全链路 4 项验收（--url 不要带 /v1 后缀）
+# 5. 全链路 4 项验收（先在 Modal 控制台 Settings -> Proxy Auth Tokens 生成 wk-/ws-；--url 不要带 /v1 后缀）
 python modal-deploy/smoke_test.py \
   --url https://<workspace>--qwen38-27b-sglang-sglangserver-serve.modal.run \
   --api-key "sk-your-strong-secret" \
+  --modal-key "wk-your-proxy-key" \
+  --modal-secret "ws-your-proxy-secret" \
   --model qwen3.8-27b-ft
 ```

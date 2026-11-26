@@ -7,11 +7,17 @@ Verifies:
   4. Tool calling roundtrip parses arguments cleanly
 
 Usage:
-  python smoke_test.py --url https://<your-app>.modal.run --api-key sk-xxx --model qwen3.8-27b-ft
+  python smoke_test.py \
+    --url https://<your-app>.modal.run \
+    --api-key sk-xxx \
+    --modal-key wk-xxx \
+    --modal-secret ws-xxx \
+    --model qwen3.8-27b-ft
 """
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -25,10 +31,10 @@ def http_json(url: str, headers: dict, payload: dict | None = None, timeout: int
         return resp.status, json.loads(resp.read().decode("utf-8"))
 
 
-def test_auth_rejection(base_url: str):
-    print("[1/4] Checking unauthenticated rejection on /v1/models (first call triggers cold start) ...")
+def test_auth_rejection(base_url: str, label: str, extra_headers: dict | None = None, expect_edge: bool = False):
+    print(label)
     t0 = time.perf_counter()
-    req = urllib.request.Request(f"{base_url}/v1/models", method="GET")
+    req = urllib.request.Request(f"{base_url}/v1/models", headers=extra_headers or {}, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=360) as resp:
             print(f"  [FAIL] Endpoint accepted unauthenticated request! HTTP {resp.status}")
@@ -36,7 +42,8 @@ def test_auth_rejection(base_url: str):
     except urllib.error.HTTPError as e:
         dt = time.perf_counter() - t0
         if e.code in (401, 403):
-            print(f"  [PASS] Rejected with HTTP {e.code} in {dt:.2f}s")
+            note = " (edge-blocked without GPU wakeup)" if expect_edge and dt < 5.0 else ""
+            print(f"  [PASS] Rejected with HTTP {e.code} in {dt:.2f}s{note}")
             return True
         print(f"  [WARN] Unexpected HTTP {e.code} in {dt:.2f}s: {e.read().decode('utf-8', errors='replace')[:300]}")
         return False
@@ -145,19 +152,51 @@ def main():
     parser = argparse.ArgumentParser(description="Smoke-test deployed Modal SGLang endpoint")
     parser.add_argument("--url", required=True, help="Base Modal URL, e.g. https://xxx.modal.run")
     parser.add_argument("--api-key", required=True, help="Bearer API key configured in Modal Secret")
+    parser.add_argument(
+        "--modal-key",
+        default=os.environ.get("MODAL_PROXY_KEY"),
+        help="Modal Proxy Auth Token key (wk-..., or env MODAL_PROXY_KEY)",
+    )
+    parser.add_argument(
+        "--modal-secret",
+        default=os.environ.get("MODAL_PROXY_SECRET"),
+        help="Modal Proxy Auth Token secret (ws-..., or env MODAL_PROXY_SECRET)",
+    )
     parser.add_argument("--model", default="qwen3.8-27b-ft", help="Served model name")
     args = parser.parse_args()
 
+    if bool(args.modal_key) != bool(args.modal_secret):
+        parser.error("--modal-key and --modal-secret must be provided together.")
+
     base_url = args.url.rstrip("/")
+    proxy_headers = (
+        {"Modal-Key": args.modal_key, "Modal-Secret": args.modal_secret}
+        if args.modal_key
+        else {}
+    )
     headers = {
+        **proxy_headers,
         "Authorization": f"Bearer {args.api_key}",
         "Content-Type": "application/json",
     }
 
-    ok = test_auth_rejection(base_url)
+    if proxy_headers:
+        step1_label = "[1/4] Checking unauthenticated edge rejection on /v1/models (should fail fast without waking GPU) ..."
+    else:
+        step1_label = "[1/4] Checking unauthenticated rejection on /v1/models (first call may trigger cold start) ..."
+    ok = test_auth_rejection(base_url, step1_label, expect_edge=bool(proxy_headers))
     if not ok:
         sys.exit(1)
+
     test_models(base_url, headers)
+    if proxy_headers:
+        ok_inner = test_auth_rejection(
+            base_url,
+            "[2b/4] Checking inner Bearer API key rejection (with valid Modal Proxy Auth headers) ...",
+            extra_headers=proxy_headers,
+        )
+        if not ok_inner:
+            sys.exit(1)
     test_streaming_chat(base_url, headers, args.model)
     test_tool_calling(base_url, headers, args.model)
     print("\nAll smoke tests finished.")

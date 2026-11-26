@@ -58,12 +58,25 @@ def _read_dotenv_file(path: str) -> dict[str, str]:
     return values
 
 
+_LOCAL_ENV = _read_dotenv_file(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env.local")
+)
+
+
+def _get_deploy_env(name: str) -> str | None:
+    return os.environ.get(name) or _LOCAL_ENV.get(name)
+
+
+def _get_deploy_bool(name: str, default: bool) -> bool:
+    raw = _get_deploy_env(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
 def _resolve_model_config() -> tuple[str, str]:
-    local_env = _read_dotenv_file(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env.local")
-    )
-    env_subdir = os.environ.get("SGLANG_MODEL_SUBDIR") or local_env.get("SGLANG_MODEL_SUBDIR")
-    env_served = os.environ.get("SGLANG_SERVED_MODEL_NAME") or local_env.get("SGLANG_SERVED_MODEL_NAME")
+    env_subdir = _get_deploy_env("SGLANG_MODEL_SUBDIR")
+    env_served = _get_deploy_env("SGLANG_SERVED_MODEL_NAME")
     if env_subdir and env_served:
         return env_subdir, env_served
     profile = os.environ.get("MODAL_PROFILE") or getattr(modal.config, "_profile", None) or ""
@@ -100,6 +113,13 @@ MAX_CONTAINERS = 1              # Strict single-GPU cap (~$1.95/hr max burn rate
 SGLANG_PORT = 8000
 ENABLE_GPU_SNAPSHOT = True      # Modal CPU+GPU memory snapshot for ~15-30s cold starts
 CUDA_GRAPH_MAX_BS = 4           # Captured once during snapshot; faster decode with zero restore penalty
+
+# Edge proxy authentication (Modal-Key & Modal-Secret headers checked at Modal ingress BEFORE
+# waking up any GPU container — prevents unauthenticated requests from burning GPU billing).
+# Set SGLANG_REQUIRE_PROXY_AUTH=false in shell or .env.local only if you intentionally handle
+# auth at another external gateway or want direct Bearer-only access.
+REQUIRE_PROXY_AUTH = _get_deploy_bool("SGLANG_REQUIRE_PROXY_AUTH", True)
+ENDPOINT_LABEL: str | None = (_get_deploy_env("SGLANG_ENDPOINT_LABEL") or "").strip() or None
 
 # Official prebuilt SGLang image (sglang 0.5.23, transformers 5.19.0, cu130) with Qwen3_5 / Qwen3.8 support
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.23"
@@ -276,7 +296,12 @@ class SGLangServer:
             except Exception as exc:
                 print(f"[snapshot-prep] cache_volume.commit warning (non-fatal): {exc}", flush=True)
 
-    @modal.web_server(port=SGLANG_PORT, startup_timeout=600)
+    @modal.web_server(
+        port=SGLANG_PORT,
+        startup_timeout=600,
+        label=ENDPOINT_LABEL,
+        requires_proxy_auth=REQUIRE_PROXY_AUTH,
+    )
     def serve(self):
         # SGLang is started in @modal.enter(snap=True) and already listening on 0.0.0.0:SGLANG_PORT
         # after GPU memory snapshot restore.
