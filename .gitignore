@@ -1,0 +1,19 @@
+﻿# Secrets & local environment overrides
+.env
+.env.local
+.env.*
+!.env.example
+
+# Python caches & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
